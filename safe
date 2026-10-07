@@ -1,0 +1,291 @@
+import queue
+import time
+
+import numpy as np
+import sounddevice as sd
+
+from faster_whisper import WhisperModel
+
+
+class SpeechToText:
+
+    def __init__(self):
+
+        # ====================================================
+        # WHISPER
+        # ====================================================
+
+        print("🌙 Loading LUNA speech model...")
+
+        self.model = WhisperModel(
+            "tiny",
+            device="cpu",
+            compute_type="int8",
+        )
+
+        print("✅ Speech model ready.")
+
+        # ====================================================
+        # AUDIO
+        # ====================================================
+
+        self.sample_rate = 16000
+        self.channels = 1
+
+        self.block_duration = 0.20
+
+        self.block_size = int(
+            self.sample_rate
+            * self.block_duration
+        )
+
+        # ====================================================
+        # DETECTION
+        # ====================================================
+
+        self.energy_threshold = 0.010
+
+        # Faster ending
+        self.silence_duration = 0.60
+
+        # Maximum sentence duration
+        self.max_recording_time = 10.0
+
+        # Minimum speech
+        self.min_recording_time = 0.25
+
+    # ========================================================
+    # RECORD
+    # ========================================================
+
+    def _record_audio(self):
+
+        audio_queue = queue.Queue()
+
+        recording = []
+
+        speech_started = False
+
+        start_time = None
+
+        last_voice_time = None
+
+        def callback(
+            indata,
+            frames,
+            time_info,
+            status
+        ):
+
+            if status:
+                print(
+                    f"🎙️ {status}"
+                )
+
+            audio_queue.put(
+                indata[:, 0].copy()
+            )
+
+        try:
+
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype="float32",
+                blocksize=self.block_size,
+                callback=callback,
+            ):
+
+                print(
+                    "\n🎙️ Listening..."
+                )
+
+                wait_start = time.time()
+
+                while True:
+
+                    try:
+
+                        audio = audio_queue.get(
+                            timeout=0.5
+                        )
+
+                    except queue.Empty:
+
+                        continue
+
+                    recording.append(
+                        audio
+                    )
+
+                    now = time.time()
+
+                    rms = float(
+                        np.sqrt(
+                            np.mean(
+                                audio * audio
+                            )
+                        )
+                    )
+
+                    # ----------------------------------------
+                    # SPEECH START
+                    # ----------------------------------------
+
+                    if rms >= self.energy_threshold:
+
+                        if not speech_started:
+
+                            speech_started = True
+
+                            start_time = now
+
+                            print(
+                                "🎤 Speech detected"
+                            )
+
+                        last_voice_time = now
+
+                    # ----------------------------------------
+                    # SPEECH END
+                    # ----------------------------------------
+
+                    if speech_started:
+
+                        speech_time = (
+                            now - start_time
+                        )
+
+                        silence_time = (
+                            now - last_voice_time
+                            if last_voice_time
+                            else 0
+                        )
+
+                        if (
+                            speech_time
+                            >= self.min_recording_time
+                            and silence_time
+                            >= self.silence_duration
+                        ):
+
+                            break
+
+                        if (
+                            speech_time
+                            >= self.max_recording_time
+                        ):
+
+                            break
+
+                    # ----------------------------------------
+                    # NOTHING SPOKEN
+                    # ----------------------------------------
+
+                    if (
+                        not speech_started
+                        and
+                        now - wait_start
+                        > 8
+                    ):
+
+                        return None
+
+                if not recording:
+
+                    return None
+
+                return np.concatenate(
+                    recording
+                ).astype(
+                    np.float32
+                )
+
+        except Exception as error:
+
+            print(
+                f"❌ Microphone error: {error}"
+            )
+
+            return None
+
+    # ========================================================
+    # TRANSCRIBE
+    # ========================================================
+
+    def _transcribe(
+        self,
+        audio
+    ):
+
+        try:
+
+            segments, info = (
+                self.model.transcribe(
+                    audio,
+                    language="en",
+                    beam_size=1,
+                    best_of=1,
+                    temperature=0,
+                    vad_filter=True,
+                    condition_on_previous_text=False,
+                )
+            )
+
+            text_parts = []
+
+            for segment in segments:
+
+                text = segment.text.strip()
+
+                if text:
+
+                    text_parts.append(
+                        text
+                    )
+
+            return " ".join(
+                text_parts
+            ).strip()
+
+        except Exception as error:
+
+            print(
+                f"❌ Whisper error: {error}"
+            )
+
+            return None
+
+    # ========================================================
+    # LISTEN
+    # ========================================================
+
+    def listen(self):
+
+        audio = self._record_audio()
+
+        if audio is None:
+
+            return None
+
+        print(
+            "🧠 Transcribing..."
+        )
+
+        text = self._transcribe(
+            audio
+        )
+
+        if not text:
+
+            print(
+                "❌ I couldn't understand that."
+            )
+
+            return None
+
+        print(
+            f"📝 You said: {text}"
+        )
+
+        return text

@@ -1,0 +1,5 @@
+PySide6
+psutil
+google-genai
+groq
+python-dotenv
